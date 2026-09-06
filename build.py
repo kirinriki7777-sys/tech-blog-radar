@@ -1,11 +1,30 @@
+import datetime
+import email.utils
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
-RSS_URL = "https://yamadashy.github.io/tech-blog-rss-feed/feeds/rss.xml"
+FEEDS = [
+    {
+        "name": "Tech Blogs",
+        "url": "https://yamadashy.github.io/tech-blog-rss-feed/feeds/rss.xml",
+        "kind": "tech_blog",
+    },
+    {
+        "name": "Zenn Trend",
+        "url": "https://zenn.dev/feed",
+        "kind": "trend",
+    },
+    {
+        "name": "Qiita Popular",
+        "url": "https://qiita.com/popular-items/feed",
+        "kind": "trend",
+    },
+]
 
 CATEGORIES = {
     "AI・機械学習": {"icon": "🤖", "keywords": [
@@ -37,6 +56,9 @@ CATEGORIES = {
         "研修", "オンボーディング", "開発合宿", "コードレビュー", "ポエム", "振り返り", "組織",
     ]},
 }
+
+TRACKING_QUERY_PREFIXES = ("utm_",)
+USER_AGENT = "TechBlogRadar/1.1 (+https://github.com/kirinriki7777-sys/tech-blog-radar)"
 
 
 class _TextExtractor(HTMLParser):
@@ -91,6 +113,62 @@ def classify_article(title: str, description: str):
     return best_category, matched_tags[:5]
 
 
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _element_text(element) -> str:
+    if element is None:
+        return ""
+    return "".join(element.itertext()).strip()
+
+
+def _first_child_text(parent, names) -> str:
+    wanted = set(names)
+    for child in list(parent):
+        if _local_name(child.tag) in wanted:
+            return _element_text(child)
+    return ""
+
+
+def _entry_link(entry) -> str:
+    for child in list(entry):
+        if _local_name(child.tag) != "link":
+            continue
+        href = (child.attrib.get("href") or "").strip()
+        rel = (child.attrib.get("rel") or "alternate").strip()
+        if href and rel in {"", "alternate"}:
+            return href
+        text = _element_text(child)
+        if text:
+            return text
+    return ""
+
+
+def canonicalize_url(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+    except ValueError:
+        return value.strip()
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return value.strip()
+
+    query = [
+        (key, val)
+        for key, val in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith(TRACKING_QUERY_PREFIXES)
+    ]
+    path = parsed.path or "/"
+    return urllib.parse.urlunsplit((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        urllib.parse.urlencode(query, doseq=True),
+        "",
+    ))
+
+
 def source_name(link: str) -> str:
     try:
         host = urllib.parse.urlparse(link).hostname or ""
@@ -99,35 +177,138 @@ def source_name(link: str) -> str:
         return "外部サイト"
 
 
-def fetch_and_parse():
-    request = urllib.request.Request(
-        RSS_URL,
-        headers={"User-Agent": "TechBlogRadar/1.0 (+https://github.com/kirinriki7777-sys/tech-blog-radar)"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        xml_data = response.read()
+def _parse_datetime(value: str):
+    if not value:
+        return None
 
-    root = ET.fromstring(xml_data)
-    channel = root.find("channel")
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+        if parsed:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            return parsed
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _fetch_xml(url: str, attempts: int = 3) -> bytes:
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read()
+        except Exception as error:
+            last_error = error
+            if attempt < attempts:
+                time.sleep(2 ** (attempt - 1))
+    raise RuntimeError(f"Failed to fetch {url} after {attempts} attempts") from last_error
+
+
+def _parse_rss(root, feed):
+    channel = next((child for child in list(root) if _local_name(child.tag) == "channel"), None)
     if channel is None:
-        return []
+        raise ValueError(f"{feed['name']}: RSS channel not found")
 
     articles = []
-    for item in channel.findall("item"):
-        title = clean_text(item.findtext("title", ""))
-        link = (item.findtext("link", "") or "").strip()
-        pub_date = (item.findtext("pubDate", "") or "").strip()
-        description = clean_text(item.findtext("description", ""))
-        category, tags = classify_article(title, description)
-        articles.append({
-            "title": title,
-            "link": link,
-            "pubDate": pub_date,
-            "description": description[:150] + "..." if len(description) > 150 else description,
-            "category": category,
-            "tags": tags,
-            "source": source_name(link),
-        })
+    for item in list(channel):
+        if _local_name(item.tag) != "item":
+            continue
+        title = clean_text(_first_child_text(item, {"title"}))
+        link = canonicalize_url(_first_child_text(item, {"link"}))
+        pub_date = _first_child_text(item, {"pubDate", "date", "updated", "published"})
+        description = clean_text(_first_child_text(item, {"description", "encoded", "content", "summary"}))
+        articles.append(_make_article(title, link, pub_date, description, feed))
+    return articles
+
+
+def _parse_atom(root, feed):
+    articles = []
+    for entry in list(root):
+        if _local_name(entry.tag) != "entry":
+            continue
+        title = clean_text(_first_child_text(entry, {"title"}))
+        link = canonicalize_url(_entry_link(entry))
+        pub_date = _first_child_text(entry, {"published", "updated", "date"})
+        description = clean_text(_first_child_text(entry, {"content", "summary", "description"}))
+        articles.append(_make_article(title, link, pub_date, description, feed))
+    return articles
+
+
+def _make_article(title: str, link: str, pub_date: str, description: str, feed):
+    category, tags = classify_article(title, description)
+    return {
+        "title": title,
+        "link": link,
+        "pubDate": pub_date,
+        "description": description[:150] + "..." if len(description) > 150 else description,
+        "category": category,
+        "tags": tags,
+        "source": source_name(link),
+        "feedSources": [feed["name"]],
+        "trendSources": [feed["name"]] if feed["kind"] == "trend" else [],
+    }
+
+
+def parse_feed(xml_data: bytes, feed):
+    root = ET.fromstring(xml_data)
+    root_name = _local_name(root.tag).lower()
+    if root_name == "rss":
+        return _parse_rss(root, feed)
+    if root_name == "feed":
+        return _parse_atom(root, feed)
+    raise ValueError(f"{feed['name']}: unsupported feed root <{root_name}>")
+
+
+def _merge_article(existing, incoming):
+    for key in ("feedSources", "trendSources"):
+        existing[key] = list(dict.fromkeys(existing.get(key, []) + incoming.get(key, [])))
+
+    if len(incoming.get("description", "")) > len(existing.get("description", "")):
+        existing["description"] = incoming["description"]
+
+    existing_dt = _parse_datetime(existing.get("pubDate", ""))
+    incoming_dt = _parse_datetime(incoming.get("pubDate", ""))
+    if incoming_dt and (not existing_dt or incoming_dt > existing_dt):
+        existing["pubDate"] = incoming["pubDate"]
+
+    category, tags = classify_article(existing.get("title", ""), existing.get("description", ""))
+    existing["category"] = category
+    existing["tags"] = list(dict.fromkeys(existing.get("tags", []) + tags))[:5]
+
+
+def fetch_and_parse():
+    deduped = {}
+
+    for feed in FEEDS:
+        xml_data = _fetch_xml(feed["url"])
+        articles = parse_feed(xml_data, feed)
+        print(f"{feed['name']}: fetched {len(articles)} articles")
+
+        for article in articles:
+            key = canonicalize_url(article["link"])
+            if not key:
+                key = f"{feed['name']}::{article['title']}::{article['pubDate']}"
+
+            if key in deduped:
+                _merge_article(deduped[key], article)
+            else:
+                deduped[key] = article
+
+    articles = list(deduped.values())
+    articles.sort(
+        key=lambda article: _parse_datetime(article.get("pubDate", ""))
+        or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        reverse=True,
+    )
     return articles
 
 
@@ -139,7 +320,7 @@ def generate_html(articles):
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="テックブログの記事を自動収集・分類して一覧できる軽量リーダー">
+  <meta name="description" content="テックブログ、Zennトレンド、Qiita人気記事を自動収集・分類して一覧できる軽量リーダー">
   <title>Tech Blog Radar</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -195,7 +376,7 @@ def generate_html(articles):
         <div>
           <div class="eyebrow">Signal dashboard</div>
           <h2>技術の流れを、<br>ノイズ少なめで眺める。</h2>
-          <p>国内テックブログの記事を自動収集し、分野ごとに分類。検索と表示密度を自分の読み方に合わせて調整できます。</p>
+          <p>国内テックブログ、Zennトレンド、Qiita人気記事を自動収集して分類。検索と表示密度を自分の読み方に合わせて調整できます。</p>
         </div>
         <div class="radar-stat">
           <strong id="totalCount">0</strong>
@@ -224,4 +405,4 @@ def generate_html(articles):
 if __name__ == "__main__":
     articles = fetch_and_parse()
     generate_html(articles)
-    print(f"Generated index.html with {len(articles)} articles.")
+    print(f"Generated index.html with {len(articles)} unique articles from {len(FEEDS)} feeds.")

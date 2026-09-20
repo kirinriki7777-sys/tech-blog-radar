@@ -13,18 +13,22 @@
   --shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
 }
 
+/* ダークは「計器盤」。面の明るさではなく、線とタイポの太さで階層を作る。
+   グラデーション・ぼかし・大きな影は使わない（輪郭がぼけて主役が決まらなくなるため）。
+   実装は末尾の「dark: 計器盤」ブロックと対で見ること。 */
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #0b1020;
-  --surface: rgba(15, 23, 42, 0.82);
-  --surface-strong: #111827;
-  --surface-muted: #172033;
-  --text: #eef2ff;
-  --text-soft: #9ca8bd;
-  --line: rgba(148, 163, 184, 0.14);
-  --accent: #818cf8;
-  --accent-soft: rgba(99, 102, 241, 0.16);
-  --shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+  --bg: #07090c;
+  --surface: #0d1116;
+  --surface-strong: #11161d;
+  --surface-muted: #161c24;
+  --text: #e9eef6;
+  --text-soft: #78889c;
+  --line: #1d2733;
+  --line-strong: #2c3a4b;
+  --accent: #ffb020;
+  --accent-soft: rgba(255, 176, 32, 0.13);
+  --shadow: none;
 }
 
 * { box-sizing: border-box; }
@@ -212,6 +216,70 @@ a { color: inherit; }
 .empty-state { margin: 24px 0 64px; padding: 50px 20px; border: 1px dashed var(--line); border-radius: 18px; color: var(--text-soft); text-align: center; }
 .empty-state[hidden] { display: none; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* ------------------------------------------------------------ dark: 計器盤 */
+/* ライトは従来のまま。ここはダークだけを上書きする。 */
+:root[data-theme='dark'] body { background: var(--bg); }
+:root[data-theme='dark'] .site-header {
+  background: #090c11;
+  backdrop-filter: none;
+  border-bottom: 1px solid var(--line-strong);
+}
+:root[data-theme='dark'] .brand-mark {
+  background: var(--accent);
+  color: #0a0d12;
+  border-radius: 6px;
+  box-shadow: none;
+}
+:root[data-theme='dark'] .brand-copy h1 { font-weight: 800; letter-spacing: -0.01em; }
+:root[data-theme='dark'] .search-input,
+:root[data-theme='dark'] .category-button,
+:root[data-theme='dark'] .column-input,
+:root[data-theme='dark'] .theme-switcher,
+:root[data-theme='dark'] .column-control { border-radius: 6px; }
+:root[data-theme='dark'] .hero-panel {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: none;
+}
+:root[data-theme='dark'] .hero h2 { font-weight: 800; }
+:root[data-theme='dark'] .radar-stat {
+  color: var(--accent);
+  background: var(--surface-strong);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: none;
+}
+:root[data-theme='dark'] .radar-stat span { color: var(--text-soft); opacity: 1; }
+/* カードは枠ではなく左の罫で示す。ホバーでそこだけ光らせ、面は動かさない */
+:root[data-theme='dark'] .article-card {
+  border-left: 3px solid var(--line-strong);
+  border-radius: 6px;
+  box-shadow: none;
+}
+:root[data-theme='dark'] .article-card:hover {
+  transform: none;
+  border-color: var(--line-strong);
+  border-left-color: var(--accent);
+  box-shadow: none;
+}
+:root[data-theme='dark'] .article-title { font-weight: 800; letter-spacing: -0.012em; }
+/* 日付・配信元・カテゴリは等幅。本文と役割が違うことを字形で示す */
+:root[data-theme='dark'] .article-date,
+:root[data-theme='dark'] .source-label,
+:root[data-theme='dark'] .category-badge {
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", monospace;
+  letter-spacing: 0.02em;
+}
+:root[data-theme='dark'] .category-badge {
+  color: #9db0c6;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-weight: 600;
+}
+:root[data-theme='dark'] .tag { border-radius: 3px; }
 
 @media (max-width: 1080px) {
   .header-main { grid-template-columns: 1fr minmax(260px, 420px); }
